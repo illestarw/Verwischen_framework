@@ -6,10 +6,13 @@ import ast
 import time
 import os
 
-##! Configurable Parameter
+##! Configurable Parameter (EDITABLE IN config.ini)
 
-# physiological data position(s) in the inputs. must be integer indicating position (starting from 0)
-QI_POS = [1, 2, 3]
+# quasi-identifier data position(s) in the inputs. must be integer indicating position (starting from 0)
+QI_POS = [1, 2]
+
+# sensitive data position(s) in the inputs. must be integer indicating position (starting from 0)
+SI_POS = [3, 4]
 
 # basic range for generalizing
 GENERALIZE_RANGE = 5
@@ -49,20 +52,27 @@ Init_timer = 0
 EXPERIMENT_MODE = False
 
 
-def _initialize():
+def read_config():
 	'''
-	Initialize global variables
+	Load the configuration from config.ini
 	'''
 
-	global QI_POS, GENERALIZE_RANGE, ACCUMULATION_DELAY_TOLERANCE, REFRESH_TIMER, THRESHOLD_K, EC_MAX_HOLDING_MEMBERS
-	global EC_list, Accumulated_list, Compromised_range_dict, EC_alter_log, Init_timer
+	global QI_POS, SI_POS, GENERALIZE_RANGE, ACCUMULATION_DELAY_TOLERANCE, REFRESH_TIMER, THRESHOLD_K, EC_MAX_HOLDING_MEMBERS
 
-	# read config file
+	# try-catch block for reading config file
 	try:
 		conf = configparser.ConfigParser()
 		conf.read('config.ini')
 		
 		QI_POS = ast.literal_eval(conf['params']['QI_POS'])		
+		# check if the interpreted data is a list
+		if not isinstance(QI_POS, list):
+			raise SyntaxError
+		for element in QI_POS:
+			if not isinstance(element, int):
+				raise SyntaxError
+
+		SI_POS = ast.literal_eval(conf['params']['SI_POS'])		
 		# check if the interpreted data is a list
 		if not isinstance(QI_POS, list):
 			raise SyntaxError
@@ -79,6 +89,14 @@ def _initialize():
 	except Exception:
 		raise Exception("Error: Invalid configuration parameters detected.")
 	
+
+def initialize():
+	'''
+	Initialize global variables
+	'''
+
+	global EC_list, Accumulated_list, Compromised_range_dict, EC_alter_log, Init_timer
+
 	# initialize EC list
 	EC_list = []
 
@@ -101,7 +119,7 @@ def _initialize():
 
 def publish(rawstring, QI_EC_indicator, compmode):
 	'''
-	Simulate data transmission
+	Publish data for transmission (ready to leave the device)
 	'''
 
 	# normal mode
@@ -131,18 +149,35 @@ def publish(rawstring, QI_EC_indicator, compmode):
 		# reset the compromised record dictionary
 		Compromised_range_dict.clear()
 
-	# simulate output for transmission
+
+	# discard SI fields
+	jump = 0
+	for si in SI_POS:
+		# pop SI element
+		rawstring.pop(si - jump)
+		
+		# apply change of list order (due to element pop) to next SI
+		jump += 1
+
+
+	# output
 	if EXPERIMENT_MODE:
+		# simulate output for transmission by printing the message to console
+		# in EXPERIMENT_MODE, last element of rawstring is the attached arrival timestamp of the tuple
 		print("Transmitted : ", rawstring[:-1])
+
 		# For research paper use only
+		with open("output_tuple.txt", "a") as f:
+			f.write( str(rawstring[:-1]) + '\n' )
 		with open("output_delay.txt", "a") as f:
 			f.write( str(time.time() - rawstring[-1]) + '\n' )
 	else:
+		# simulate output for transmission by printing the message to console.
+		# should be replaced by actual mechanisms of the underlying device while being deployed to WMD
 		print("Transmitted : ", rawstring)
 
 	
 	
-
 
 # Unused
 def purturbate(lbound, ubound, data):
@@ -215,6 +250,9 @@ def extend_EC(qi, ecn1, ecn2, original_value):
 
 
 def generalize(qi, data):
+	'''
+	Prepare a generalized range for the given data point
+	'''
 	global EC_list
 
 	# define lower and higher bound of generalized value 
@@ -242,12 +280,17 @@ def generalize(qi, data):
 			if lb_new < QIEC[i].get("lbound") < ub_new:
 				# 0 for lower bound overlays
 				msg = [i, 0, QIEC[i].get("lbound")]
-				print("f=",f, ", msg=", msg)
+				
+				if EXPERIMENT_MODE:
+					print("f=",f, ", msg=", msg)
 			# [ .. | .. ] .. |
 			elif lb_new < QIEC[i].get("ubound") < ub_new:
 				# 1 represents upper bound
 				msg = [i, 1, QIEC[i].get("ubound")]
-				print("f=",f, ", msg=", msg)
+
+				if EXPERIMENT_MODE:
+					print("f=",f, ", msg=", msg)
+
 				# re-adjust
 				overlap.append(msg)
 			# other possibilities:
@@ -472,6 +515,9 @@ def _apply_EC_change():
 
 
 def _flush_tuple():
+	'''
+	Immediately publish the longest accumulated tuple and pop it from accumulation queue
+	'''
 	global Accumulated_list
 
 	# flag inidcating if this record needs compromising for publication
@@ -530,12 +576,14 @@ def _check_refesh_EC():
 			_flush_tuple()
 
 		# wipe all ECs and reset timer
-		_initialize()
+		initialize()
 
 
 
-# check timeout for accumulated tuples
 def _tuple_delay_update(latest_counter):
+	'''
+	Check timeout for accumulated tuples
+	'''
 	global Accumulated_list
 
 	# if there are tuples accumulating
@@ -566,6 +614,9 @@ def _tuple_delay_update(latest_counter):
 
 
 def process(counter, sensor_value):
+	'''
+	The main processing procedure for incoming tuples
+	'''
 	global Accumulated_list
 
 	# the list for indicating which EC in EC_list does each QI fall in
@@ -592,7 +643,7 @@ def process(counter, sensor_value):
 		for ec in EC_list[qi]:
 			# if there are already matched EC satisfying privacy condition
 			if ec.get("lbound") <= sensor_value[qi] and ec.get("ubound") > sensor_value[qi] and not ec.get("deprecated") :
-				# record the number of the EC
+				# record the serial number of the EC
 				QI_EC_indicator[qi] = ec.get("number")
 				# one new tuple joining the EC
 				ec["member"] += 1
@@ -603,7 +654,7 @@ def process(counter, sensor_value):
 		if not fitEC:
 			# create a new EC or extend existed EC based on the new generalized range
 			ec_pos = generalize(qi, sensor_value[qi])
-			# record the number of the EC
+			# record the serial number of the EC
 			QI_EC_indicator[qi] = ec_pos
 			# if new EC created, the tuple definitely needs to be accumulated (until the EC has more than THRESHOLD_K members)
 			toAccumulate = True
@@ -643,9 +694,16 @@ def setExperimentMode():
 
 
 def stream_input_file(filepath):
+	'''
+	Simulate inputs by reading tuples one by one from a given file
+	Desgined for experiments in research paper
+	'''
+
+	# load config
+	read_config()
 
 	# init global variables
-	_initialize()
+	initialize()
 
 	# do parser
 	try:
@@ -674,7 +732,8 @@ def stream_input_file(filepath):
 				for qi in QI_POS:
 					tup[qi] = float(tup[qi])
 
-
+				# in order to evaluate average delay of tuple anonymization, attach arrival timestamp to raw data
+				# remove later in publish() function
 				if EXPERIMENT_MODE:
 					tup.append(time.time())
 
@@ -703,9 +762,15 @@ def stream_input_file(filepath):
 
 
 def stream_input(sensor_tuple):
+	'''
+	The function to call for actual medical devices
+	'''
+
+	# load config
+	read_config()
 
 	# init global variables
-	_initialize()
+	initialize()
 	
 	try:
 		# split data and strip whitespace

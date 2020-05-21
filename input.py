@@ -2,8 +2,12 @@ from Verwischen import *
 
 if __name__ == "__main__":
 	
+	# wipe file
+	open("output_delay.txt", "w").close()
+	open("output_tuple.txt", "w").close()
+	
 	setExperimentMode()
-	stream_input_file("dataset.csv")
+	stream_input_file("dataset4.csv")
 
 
 	'''
