@@ -11,8 +11,8 @@ import os
 # quasi-identifier data position(s) in the inputs. must be integer indicating position (starting from 0)
 QI_POS = [1, 2]
 
-# sensitive data position(s) in the inputs. must be integer indicating position (starting from 0)
-SI_POS = [3, 4]
+# identifier data position(s) in the inputs. must be integer indicating position (starting from 0)
+ID_POS = [3, 4]
 
 # basic range for generalizing
 GENERALIZE_RANGE = 5
@@ -28,6 +28,9 @@ THRESHOLD_K = 5
 
 # maximum members (records) allowed to covered by a single EC. All ECs will be wiped and refreshed when any EC reached this limit.
 EC_MAX_HOLDING_MEMBERS = 100
+
+# the minimum frequency of body sensor routine (how fast may tuple arrive)
+SENSOR_FREQUENCY = 1
 
 
 ##! Internally Used Variables (DO NOT alter)
@@ -48,8 +51,12 @@ EC_alter_log = {}
 # The timer for EC refreshing
 Init_timer = 0
 
+# DoS detection
+Last_arrival_time = 0
+
 # For research paper use only
 EXPERIMENT_MODE = False
+
 
 
 def read_config():
@@ -57,7 +64,7 @@ def read_config():
 	Load the configuration from config.ini
 	'''
 
-	global QI_POS, SI_POS, GENERALIZE_RANGE, ACCUMULATION_DELAY_TOLERANCE, REFRESH_TIMER, THRESHOLD_K, EC_MAX_HOLDING_MEMBERS
+	global QI_POS, ID_POS, GENERALIZE_RANGE, ACCUMULATION_DELAY_TOLERANCE, REFRESH_TIMER, THRESHOLD_K, EC_MAX_HOLDING_MEMBERS, SENSOR_FREQUENCY
 
 	# try-catch block for reading config file
 	try:
@@ -71,13 +78,17 @@ def read_config():
 		for element in QI_POS:
 			if not isinstance(element, int):
 				raise SyntaxError
+			elif element < 0:
+				raise SyntaxError
 
-		SI_POS = ast.literal_eval(conf['params']['SI_POS'])		
+		ID_POS = ast.literal_eval(conf['params']['ID_POS'])		
 		# check if the interpreted data is a list
-		if not isinstance(QI_POS, list):
+		if not isinstance(ID_POS, list):
 			raise SyntaxError
-		for element in QI_POS:
+		for element in ID_POS:
 			if not isinstance(element, int):
+				raise SyntaxError
+			elif element < 0:
 				raise SyntaxError
 
 		GENERALIZE_RANGE = float(conf['params']['GENERALIZE_RANGE'])
@@ -85,6 +96,11 @@ def read_config():
 		REFRESH_TIMER = float(conf['params']['REFRESH_TIMER'])
 		THRESHOLD_K = int(conf['params']['THRESHOLD_K'])
 		EC_MAX_HOLDING_MEMBERS = int(conf['params']['EC_MAX_HOLDING_MEMBERS'])
+		SENSOR_FREQUENCY = float(conf['params']['SENSOR_FREQUENCY'])
+
+		# positive value check
+		if GENERALIZE_RANGE < 0 or ACCUMULATION_DELAY_TOLERANCE < 0 or REFRESH_TIMER < 0 or THRESHOLD_K < 0 or EC_MAX_HOLDING_MEMBERS < 0 or SENSOR_FREQUENCY < 0:
+			raise SyntaxError
 
 	except Exception:
 		raise Exception("Error: Invalid configuration parameters detected.")
@@ -95,7 +111,7 @@ def initialize():
 	Initialize global variables
 	'''
 
-	global EC_list, Accumulated_list, Compromised_range_dict, EC_alter_log, Init_timer
+	global EC_list, Accumulated_list, Compromised_range_dict, EC_alter_log, Init_timer, Last_arrival_time
 
 	# initialize EC list
 	EC_list = []
@@ -114,6 +130,9 @@ def initialize():
 
 	# initialize timer
 	Init_timer = time.time()
+
+	# init DoS detector
+	Last_arrival_time = 0
 
 
 
@@ -150,10 +169,10 @@ def publish(rawstring, QI_EC_indicator, compmode):
 		Compromised_range_dict.clear()
 
 
-	# discard SI fields
+	# discard key identifier fields
 	jump = 0
-	for si in SI_POS:
-		# pop SI element
+	for si in ID_POS:
+		# pop ID element
 		rawstring.pop(si - jump)
 		
 		# apply change of list order (due to element pop) to next SI
@@ -179,8 +198,8 @@ def publish(rawstring, QI_EC_indicator, compmode):
 	
 	
 
-# Unused
-def purturbate(lbound, ubound, data):
+# reserved function
+def purturbate(lbound, ubound, data, ev):
 	'''
 	Perturbate leaf nodes
 	'''
@@ -192,7 +211,7 @@ def purturbate(lbound, ubound, data):
 			break
 
 		# reseed
-		seed = random.random() * 10 - 5
+		seed = random.random() * ev 
 
 	return [lbound, ubound]
 
@@ -200,6 +219,10 @@ def purturbate(lbound, ubound, data):
 
 
 def create_EC(qi, lb, ub):
+	'''
+	Generate a new cluster in the given QI group
+	'''
+
 	global EC_list
 
 	# the newly created EC will be the (EC_position)th EC of the QI
@@ -228,6 +251,11 @@ def create_EC(qi, lb, ub):
 
 
 def extend_EC(qi, ecn1, ecn2, original_value):
+	'''
+	Extend ECs to cover ranges that are not enough to support the establishment of new EC
+	Used only on new data arrival (not forced)
+	'''
+
 	global EC_list
 
 	# sort the two EC
@@ -251,8 +279,9 @@ def extend_EC(qi, ecn1, ecn2, original_value):
 
 def generalize(qi, data):
 	'''
-	Prepare a generalized range for the given data point
+	Prepare a generalized range for a given data point of the QI
 	'''
+
 	global EC_list
 
 	# define lower and higher bound of generalized value 
@@ -339,7 +368,7 @@ def generalize(qi, data):
 
 def extend_EC_force(qi, sensor_value_qi, ecn):
 	'''
-	Force enlarge EC to accomodate a record
+	Force enlarge an EC to accomodate an QI record immediately
 	'''
 
 	global EC_list, EC_alter_log
@@ -491,8 +520,8 @@ def extend_EC_force(qi, sensor_value_qi, ecn):
 
 def _apply_EC_change():
 	'''
-	apply alternation of EC to other accumulated tuples
-	after EC enlargement, check if other QI entries in accumulated tuples match the new enlarged EC
+	Apply alternation of EC to other accumulated tuples
+	After EC enlargement, check if other QI entries in accumulated tuples match the new enlarged EC
 	'''
 
 	global Accumulated_list, EC_alter_log
@@ -506,9 +535,16 @@ def _apply_EC_change():
 			for tuples in Accumulated_list:
 				# tuples = [counter, sensor_value, QI_EC_indicator]
 				# QI_EC_indicator = tuples[2]
-				# if QI_EC_indicator[qi] equals to original_ec_number, replace it with the new_ec_number
+				# if QI_EC_indicator[qi] equals to original_ec_number
 				if tuples[2][qi] == EC_alter_log[qi][0]:
-					tuples[2][qi] = EC_alter_log[qi][1]
+					new_ec_number = EC_alter_log[qi][1]
+					# if the raw value falls in the new enlarged EC range, replace it with the new_ec_number
+					if EC_list[qi][new_ec_number].get("lbound") <= tuples[1][qi] < EC_list[qi][new_ec_number].get("ubound"):
+						tuples[2][qi] = new_ec_number
+					# otherwise remain the original_ec_num
+					# EC change only occurs in non-compromised mode, which means the original EC is deprecated if qi entry exists in EC_alter_log
+					else:
+						pass
 
 	# clear the change after applying
 	EC_alter_log.clear()
@@ -518,6 +554,7 @@ def _flush_tuple():
 	'''
 	Immediately publish the longest accumulated tuple and pop it from accumulation queue
 	'''
+
 	global Accumulated_list
 
 	# flag inidcating if this record needs compromising for publication
@@ -531,7 +568,7 @@ def _flush_tuple():
 	# check all entries in this tuple to see if the EC fitted is ready for publication
 	for qi in QI_POS:
 		# QI_EC_indicator[qi] : EC pos of the QI
-		if EC_list[qi][QI_EC_indicator[qi]].get("member") < THRESHOLD_K:
+		if EC_list[qi][QI_EC_indicator[qi]].get("member") < THRESHOLD_K or EC_list[qi][QI_EC_indicator[qi]].get("deprecated"):
 			# In order to publish the expiring tuple immediately, extend existed EC for this QI
 			QI_EC_indicator[qi] = extend_EC_force(qi, sensor_value[qi], QI_EC_indicator[qi])
 			if QI_EC_indicator[qi] == -1:
@@ -546,6 +583,10 @@ def _flush_tuple():
 
 
 def _check_refesh_EC():
+	'''
+	Evaluate the necessity of cluster wipe to prevent overfit and linkage attack
+	'''
+
 	global Init_timer
 	
 	# flag indicating if a refresh is to be executed
@@ -584,6 +625,7 @@ def _tuple_delay_update(latest_counter):
 	'''
 	Check timeout for accumulated tuples
 	'''
+
 	global Accumulated_list
 
 	# if there are tuples accumulating
@@ -600,7 +642,7 @@ def _tuple_delay_update(latest_counter):
 			ready = True
 			for qi in QI_POS:
 				# tup[2][qi] : EC pos of the QI
-				if EC_list[qi][tup[2][qi]].get("member") < THRESHOLD_K:
+				if EC_list[qi][tup[2][qi]].get("member") < THRESHOLD_K or EC_list[qi][tup[2][qi]].get("deprecated"):
 					ready = False
 
 			if ready:
@@ -615,8 +657,10 @@ def _tuple_delay_update(latest_counter):
 
 def process(counter, sensor_value):
 	'''
-	The main processing procedure for incoming tuples
+	The core processing procedure for incoming tuples (root of all functions)
+	Runs the logic loop
 	'''
+
 	global Accumulated_list
 
 	# the list for indicating which EC in EC_list does each QI fall in
@@ -688,6 +732,7 @@ def setExperimentMode():
 	'''
 	Only for experiments used in research paper 
 	'''
+
 	global EXPERIMENT_MODE
 
 	EXPERIMENT_MODE = True
@@ -764,15 +809,25 @@ def stream_input_file(filepath):
 def stream_input(sensor_tuple):
 	'''
 	The function to call for actual medical devices
+	Call the function for each data tuple collected by body sensors
 	'''
 
-	# load config
-	read_config()
-
-	# init global variables
-	initialize()
+	## The following lines MUST BE CALLED in program using this framework BEFORE ever calling stream_input(data_tuple)
+	# read_config()
+	# initialize()
 	
+	global Last_arrival_time, SENSOR_FREQUENCY
+
 	try:
+		if Last_arrival_time == 0:
+			Last_arrival_time = time.time()
+		else:
+			now = time.time()
+			if now - Last_arrival_time < SENSOR_FREQUENCY:
+				raise Exception("Error: Irregular traffic detected. (Potential DoS)")
+			else:
+				Last_arrival_time = now
+
 		# split data and strip whitespace
 		tup = [x.strip() for x in sensor_tuple.split(',')]
 

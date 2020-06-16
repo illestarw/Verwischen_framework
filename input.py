@@ -7,7 +7,7 @@ if __name__ == "__main__":
 	open("output_tuple.txt", "w").close()
 	
 	setExperimentMode()
-	stream_input_file("dataset4.csv")
+	stream_input_file("dataset2.csv")
 
 
 	'''
